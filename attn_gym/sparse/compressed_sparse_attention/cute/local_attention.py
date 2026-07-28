@@ -115,6 +115,7 @@ def _compile_compressed(
     rope_dims: int,
     csa_topk: int,
     csa_window: int,
+    csa_rate: int,
 ) -> object:
     fuse_csa_epilogue = sink is not None
     key = (
@@ -134,6 +135,7 @@ def _compile_compressed(
         rope_dims,
         csa_topk,
         csa_window,
+        csa_rate,
     )
     compiled = _cache_get(key)
     if compiled is not None:
@@ -158,6 +160,7 @@ def _compile_compressed(
         csa_rope_dims=rope_dims,
         csa_topk=csa_topk,
         csa_window=csa_window,
+        csa_rate=csa_rate,
     )
     compiled = cute.compile(
         kernel,
@@ -276,16 +279,23 @@ def compressed_attention(
     rope_dims: int = 64,
     csa_topk: int = 0,
     csa_window: int = 0,
+    csa_rate: int = 0,
     store_lse: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Compute the padded top-k compressed partial with the vendored SM100 CuTe kernel."""
     if query.ndim != 4 or value.ndim != 4 or gather.ndim != 3:
         raise ValueError("query/value must use BSHD and gather must use BSK layout.")
     batch, sequence, heads, dim = query.shape
-    if heads != 128 or dim != 512 or value.shape[:1] != (batch,):
-        raise ValueError("compressed CuTe attention requires Q=[B,S,128,512].")
-    if value.shape[2:] != (1, 512) or gather.shape[:2] != (batch, sequence):
-        raise ValueError("compressed values must be [B,N,1,512] and gather [B,S,K].")
+    if heads not in (64, 128) or dim != 512 or value.shape[:1] != (batch,):
+        raise ValueError("compressed CuTe attention requires Q=[B,S,H,512], H in {64,128}.")
+    if heads == 64 and csa_rate <= 0:
+        raise ValueError("H64 compressed attention requires exact paired-union metadata.")
+    gather_rows = math.ceil(sequence * heads / 128)
+    if value.shape[2:] != (1, 512) or gather.shape[:2] != (batch, gather_rows):
+        raise ValueError(
+            "compressed values must be [B,N,1,512] and gather must have one row "
+            "per packed 128-query cluster."
+        )
     if gather.shape[-1] % 128 or gather.dtype != torch.int32:
         raise ValueError("the CuTe gather length must be a multiple of 128 with int32 indices.")
     if (not query.is_contiguous() and not fuse_q_rope) or query.stride(-1) != 1:
@@ -364,6 +374,7 @@ def compressed_attention(
         rope_dims,
         csa_topk,
         csa_window,
+        csa_rate,
     )
     compiled(
         None,

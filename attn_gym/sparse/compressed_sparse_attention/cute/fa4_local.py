@@ -33,6 +33,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 '''
 
 import math
+import operator
 import time
 from functools import partial
 from typing import Callable, Optional
@@ -107,6 +108,7 @@ class FlashAttentionMLAForwardSm100:
         csa_rope_dims: int = 64,
         csa_topk: int = 0,
         csa_window: int = 0,
+        csa_rate: int = 0,
     ):
         self.is_causal = is_causal
         self.is_local = is_local
@@ -121,7 +123,9 @@ class FlashAttentionMLAForwardSm100:
         self.is_topk_gather = is_topk_gather
         if is_topk_gather:
             assert pack_gqa
-            assert qhead_per_kvhead == 128, "require MQA 128 for DSA path"
+            assert qhead_per_kvhead == 128 or (
+                qhead_per_kvhead == 64 and csa_rate > 0
+            ), "H64 gather requires exact paired-union metadata"
             assert use_cpasync_load_KV
         # user-provided option if topk indices guaranteed in bounds
         self.disable_bitmask = disable_bitmask
@@ -132,10 +136,21 @@ class FlashAttentionMLAForwardSm100:
         self.csa_rope_dims = csa_rope_dims
         self.csa_topk = csa_topk
         self.csa_window = csa_window
+        self.csa_rate = csa_rate
         if csa_topk or csa_window:
             assert is_topk_gather and csa_topk >= 0 and csa_window >= 0
             assert csa_topk + csa_window <= topk_length
-        if fuse_csa_epilogue or fuse_csa_q_rope:
+        if csa_rate:
+            assert is_topk_gather and qhead_per_kvhead == 64
+            assert csa_topk > 0 and csa_window > 0 and csa_rate > 0
+            assert (
+                csa_topk + csa_window + 128 // qhead_per_kvhead - 1
+                <= topk_length
+            )
+        if fuse_csa_epilogue:
+            assert pack_gqa and qhead_per_kvhead in (64, 128) and hdimv == 512
+            assert 0 < csa_rope_dims <= hdimv and csa_rope_dims % 2 == 0
+        if fuse_csa_q_rope:
             assert pack_gqa and qhead_per_kvhead == 128 and hdimv == 512
             assert 0 < csa_rope_dims <= hdimv and csa_rope_dims % 2 == 0
 
@@ -1426,7 +1441,17 @@ class FlashAttentionMLAForwardSm100:
         if const_expr(self.is_topk_gather):
             n_block_min = 0
             if const_expr(self.csa_topk or self.csa_window):
-                local_count = min(self.csa_window, cluster_m_block + 1)
+                positions_per_cluster = self.cluster_tile_m // self.qhead_per_kvhead
+                union_window = self.csa_window
+                if const_expr(self.csa_rate > 0):
+                    union_window += positions_per_cluster - 1
+                local_count = min(
+                    union_window,
+                    min(
+                        seqlen.seqlen_q,
+                        (cluster_m_block + 1) * positions_per_cluster,
+                    ),
+                )
                 selected_count = self.csa_topk + local_count
                 n_block_max = cute.ceil_div(selected_count, self.tile_n)
             else:
@@ -1521,6 +1546,59 @@ class FlashAttentionMLAForwardSm100:
         consumer_state.advance()
         producer_state.advance()
         return consumer_state, producer_state
+
+    @cute.jit
+    def compute_hca_bitmask(
+        self,
+        gather_manager: CpasyncGatherKVManager,
+        producer_state_bitmask: pipeline.PipelineState,
+        cluster_m_block: Int32,
+        seqlen,
+    ):
+        """Produce the exact per-query mask for an H64 two-position union gather."""
+        assert gather_manager.pipeline_bitmask is not None
+        assert gather_manager.cpasync_barrier is not None
+        assert cute.size(gather_manager.rTopk_NonInterleaved) == 1
+        lane_idx = cute.arch.lane_idx()
+        gathered_index = gather_manager.rTopk_NonInterleaved[0]
+        positions_per_cluster = self.cluster_tile_m // self.qhead_per_kvhead
+        query_position = min(
+            seqlen.seqlen_q - 1,
+            cluster_m_block * positions_per_cluster
+            + gather_manager.cta_rank_in_cluster,
+        )
+
+        is_valid = (
+            gathered_index >= 0
+            and gathered_index < gather_manager.seqlen_k_limit
+        )
+        if gathered_index < self.csa_topk:
+            completed = (query_position + 1) // self.csa_rate
+            is_valid = is_valid and gathered_index < completed
+        else:
+            local_position = gathered_index - self.csa_topk
+            local_begin = max(0, query_position - self.csa_window + 1)
+            is_valid = (
+                is_valid
+                and local_position >= local_begin
+                and local_position <= query_position
+            )
+
+        bitmask = Uint32(0)
+        if is_valid:
+            bitmask = Uint32(1 << lane_idx)
+        bitmask = fa_utils.warp_reduce(bitmask, operator.add)
+
+        gather_manager.pipeline_bitmask.producer_acquire(producer_state_bitmask)
+        if lane_idx == 0:
+            gather_manager.sBitmask[
+                gather_manager.warp_idx,
+                producer_state_bitmask.index,
+            ] = bitmask
+        gather_manager.cpasync_barrier.arrive_and_wait()
+        gather_manager.pipeline_bitmask.producer_commit(producer_state_bitmask)
+        producer_state_bitmask.advance()
+        return producer_state_bitmask
 
     @cute.jit
     def load_cpasync(
@@ -1725,9 +1803,17 @@ class FlashAttentionMLAForwardSm100:
                 for split in cutlass.range_constexpr(self.num_hdimv_splits):
                     producer_state_V = load_V(producer_state_V, d_offset=split * self.hdimv // 2)
                 if const_expr(not self.disable_bitmask):
-                    producer_state_bitmask = cpasync_gather_kv_manager.compute_bitmask(
-                        producer_state_bitmask
-                    )
+                    if const_expr(self.csa_rate > 0):
+                        producer_state_bitmask = self.compute_hca_bitmask(
+                            cpasync_gather_kv_manager,
+                            producer_state_bitmask,
+                            cluster_m_block,
+                            seqlen,
+                        )
+                    else:
+                        producer_state_bitmask = cpasync_gather_kv_manager.compute_bitmask(
+                            producer_state_bitmask
+                        )
 
                 if const_expr(self.use_tma_O and self.overlap_sO_sV):
                     cute.arch.mbarrier_wait(sO_empty_mbar_ptr, phase=producer_phase_O)
@@ -1744,9 +1830,19 @@ class FlashAttentionMLAForwardSm100:
                             producer_state_V, d_offset=split * self.hdimv // 2
                         )
                     if const_expr(not self.disable_bitmask):
-                        producer_state_bitmask = cpasync_gather_kv_manager.compute_bitmask(
-                            producer_state_bitmask
-                        )
+                        if const_expr(self.csa_rate > 0):
+                            producer_state_bitmask = self.compute_hca_bitmask(
+                                cpasync_gather_kv_manager,
+                                producer_state_bitmask,
+                                cluster_m_block,
+                                seqlen,
+                            )
+                        else:
+                            producer_state_bitmask = (
+                                cpasync_gather_kv_manager.compute_bitmask(
+                                    producer_state_bitmask
+                                )
+                            )
                     # Vt0, Vt1
                     cpasync_gather_kv_manager.load_index_topk(n_block, transpose=True)
                     for split in cutlass.range_constexpr(self.num_hdimv_splits):
