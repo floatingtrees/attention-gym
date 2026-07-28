@@ -80,13 +80,10 @@ def _validate_inputs(
         or KV.shape[2:] != (sequence, head_dim)
     ):
         expected_heads = "1 or heads" if share_kv else "heads"
-        raise ValueError(
-            f"KV must have shape [batch, {expected_heads}, sequence, head_dim]."
-        )
+        raise ValueError(f"KV must have shape [batch, {expected_heads}, sequence, head_dim].")
     if tuple(KV_norm_weight.shape) != (head_dim,):
         raise ValueError(
-            f"KV_norm_weight must have shape {(head_dim,)}, "
-            f"got {tuple(KV_norm_weight.shape)}."
+            f"KV_norm_weight must have shape {(head_dim,)}, got {tuple(KV_norm_weight.shape)}."
         )
     if tuple(attention_sink.shape) != (heads,):
         raise ValueError(
@@ -183,7 +180,7 @@ def sliding_window_attention(
     """Apply DeepSeek-V4 causal sliding-window attention.
 
     ``auto`` and ``chunked`` are prefill aliases. The optimized CuTe backend targets
-    SM100 with BF16, D=512, and one physically shared KV head. It is forward-only.
+    SM100 with BF16, D=512, and one physically shared KV head.
     """
     if backend not in ("eager", "triton", "cute"):
         raise ValueError(
@@ -213,14 +210,6 @@ def sliding_window_attention(
     if backend in ("eager", "triton"):
         implementation = _load_eager_implementation()
     else:
-        if torch.is_grad_enabled() and any(
-            tensor.requires_grad
-            for tensor in (Q, KV, KV_norm_weight, attention_sink)
-        ):
-            raise RuntimeError(
-                "The CuTe sliding window attention backend is forward-only; "
-                "use backend='eager' when gradients are required."
-            )
         if _cute_implementation is None:
             assert _cute_initialization_error is not None
             raise RuntimeError(str(_cute_initialization_error)) from _cute_initialization_error

@@ -18,7 +18,9 @@ _COMPILE_CACHE_MAXSIZE = 32
 _compile_cache: OrderedDict[tuple[object, ...], object] = OrderedDict()
 
 
-def _tensor_signature(tensor: torch.Tensor) -> tuple[object, ...]:
+def _tensor_signature(tensor: torch.Tensor | None) -> tuple[object, ...] | None:
+    if tensor is None:
+        return None
     return tensor.dtype, tuple(tensor.shape), tuple(tensor.stride())
 
 
@@ -26,6 +28,7 @@ def _compile_local(
     query: torch.Tensor,
     value: torch.Tensor,
     output: torch.Tensor,
+    lse: torch.Tensor | None,
     sink: torch.Tensor,
     cos: torch.Tensor,
     sin: torch.Tensor,
@@ -37,6 +40,7 @@ def _compile_local(
         _tensor_signature(query),
         _tensor_signature(value),
         _tensor_signature(output),
+        _tensor_signature(lse),
         _tensor_signature(sink),
         _tensor_signature(cos),
         window,
@@ -72,7 +76,7 @@ def _compile_local(
         None,
         to_cute_tensor(value),
         to_cute_tensor(output),
-        None,
+        to_cute_tensor(lse, assumed_align=4) if lse is not None else None,
         1.0 / math.sqrt(query.shape[-1]),
         None,
         None,
@@ -109,6 +113,7 @@ def local_attention(
     rope_dims: int,
     *,
     output: torch.Tensor,
+    lse: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Run local attention, sink normalization, and inverse RoPE in one launch."""
     if query.ndim != 4 or value.ndim != 4 or output.ndim != 4:
@@ -116,11 +121,16 @@ def local_attention(
     batch, sequence, heads, dim = query.shape
     if heads not in (64, 128) or dim != 512 or value.shape != (batch, sequence, 1, 512):
         raise ValueError(
-            "local CuTe attention requires Q=[B,S,H,512] with H in {64,128} "
-            "and V=[B,S,1,512]."
+            "local CuTe attention requires Q=[B,S,H,512] with H in {64,128} and V=[B,S,1,512]."
         )
     if output.shape != query.shape:
         raise ValueError("output must have the same logical BSHD shape as query.")
+    if lse is not None and (
+        lse.shape != (batch, sequence, heads)
+        or lse.device != query.device
+        or lse.dtype != torch.float32
+    ):
+        raise ValueError("lse must be FP32 [B,S,H] on query's device.")
     if not 1 <= window <= sequence:
         raise ValueError("window must be in [1, sequence].")
     if not query.is_contiguous() or not value.is_contiguous():
@@ -141,6 +151,7 @@ def local_attention(
         query,
         value,
         output,
+        lse,
         sink,
         cos,
         sin,
@@ -154,7 +165,7 @@ def local_attention(
         None,
         value,
         output,
-        None,
+        lse,
         1.0 / math.sqrt(dim),
         None,
         None,

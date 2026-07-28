@@ -94,19 +94,68 @@ def test_cute_dispatch_reaches_registered_op_during_fullgraph_trace(monkeypatch)
     assert result.shape == (2, 4, 7, 8)
     assert len(captured_graphs) == 1
     assert any(
-        node.target
-        is torch.ops.attention_gym._cute_sliding_window_attention_forward.default
+        node.target is torch.ops.attention_gym._cute_sliding_window_attention_forward.default
         for node in captured_graphs[0].graph.nodes
     )
 
 
-def test_cute_backend_rejects_autograd_inputs(monkeypatch):
+def test_cute_autograd_reaches_registered_backward_during_aot_trace(monkeypatch):
+    if api._cute_implementation is None:
+        pytest.skip(f"CuTe backend is unavailable: {api._cute_initialization_error}")
+
+    from functorch.compile import aot_function, make_boxed_func
+    from torch._subclasses.fake_tensor import FakeTensorMode
+
+    captured_backward_graphs = []
+
+    def forward_compiler(graph_module, _example_inputs):
+        return make_boxed_func(graph_module.forward)
+
+    def backward_compiler(graph_module, _example_inputs):
+        captured_backward_graphs.append(graph_module)
+        return make_boxed_func(graph_module.forward)
+
+    def run(*tensor_args):
+        return api.sliding_window_attention(
+            *tensor_args,
+            5,
+            4,
+            True,
+            backend="cute",
+        )
+
+    monkeypatch.setattr(api, "_load_cute_implementation", fail_loader)
+    monkeypatch.setattr(api, "_validate_cute_dependencies", fail_loader)
+    compiled = aot_function(
+        run,
+        fw_compiler=forward_compiler,
+        bw_compiler=backward_compiler,
+    )
+    with FakeTensorMode():
+        tensor_args = tuple(tensor.requires_grad_() for tensor in make_arguments()[:4])
+        compiled(*tensor_args).sum().backward()
+
+    assert len(captured_backward_graphs) == 1
+    assert any(
+        node.target is torch.ops.attention_gym._cute_sliding_window_attention_backward.default
+        for node in captured_backward_graphs[0].graph.nodes
+    )
+
+
+def test_cute_backend_dispatches_autograd_inputs(monkeypatch):
     arguments = list(make_arguments())
     arguments[0].requires_grad_(True)
-    monkeypatch.setattr(api, "_cute_implementation", fail_loader)
+    expected = object()
+    calls = []
 
-    with pytest.raises(RuntimeError, match="forward-only"):
-        api.sliding_window_attention(*arguments, backend="cute")
+    def implementation(*args):
+        calls.append(args)
+        return expected
+
+    monkeypatch.setattr(api, "_cute_implementation", implementation)
+
+    assert api.sliding_window_attention(*arguments, backend="cute") is expected
+    assert calls == [tuple(arguments)]
 
 
 @pytest.mark.parametrize("backend", ["eager", "triton", "cute"])

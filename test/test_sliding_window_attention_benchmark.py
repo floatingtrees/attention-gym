@@ -6,15 +6,12 @@ from pathlib import Path
 
 import pytest
 
-
 BENCHMARK_DIRECTORY = (
-    Path(__file__).parents[1]
-    / "benchmarks"
-    / "sparse"
-    / "benchmark_sliding_window_attention"
+    Path(__file__).parents[1] / "benchmarks" / "sparse" / "benchmark_sliding_window_attention"
 )
 BENCHMARK_SCRIPTS = (
     "benchmark_sliding_window_attention_cute.py",
+    "benchmark_sliding_window_attention_cute_forward_backward.py",
     "benchmark_sliding_window_attention_cute_tflops.py",
 )
 
@@ -66,3 +63,25 @@ def test_useful_flops_matches_canonical_dv4_shape():
 
     assert sum(min(128, position + 1) for position in range(4096)) == 516_160
     assert module.useful_flops(args) == 541_232_988_160
+
+
+def test_forward_backward_benchmark_uses_canonical_swa_shape(monkeypatch):
+    script = BENCHMARK_DIRECTORY / BENCHMARK_SCRIPTS[1]
+    spec = importlib.util.spec_from_file_location("swa_forward_backward_benchmark", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setattr(sys, "argv", [str(script)])
+
+    args = module.parse_args()
+
+    assert (
+        args.batch,
+        args.heads,
+        args.sequence_length,
+        args.head_dim,
+        args.window,
+        args.rope_dims,
+    ) == (1, 64, 4096, 512, 128, 64)
+    assert args.share_kv is True
+    assert module.DIFFERENTIABLE_INPUTS == tuple(range(4))

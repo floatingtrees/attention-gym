@@ -3,7 +3,6 @@ import importlib
 import pytest
 import torch
 
-
 api = importlib.import_module("attn_gym.sparse.heavily_compressed_attention.api")
 hca_package = importlib.import_module("attn_gym.sparse.heavily_compressed_attention")
 sparse_package = importlib.import_module("attn_gym.sparse")
@@ -73,6 +72,82 @@ def test_cute_dispatch(monkeypatch):
     result = api.heavily_compressed_attention(*arguments, backend="cute")
     assert result is expected
     assert calls == [arguments]
+
+
+def test_cute_dispatch_reaches_registered_op_without_loading_during_trace(
+    monkeypatch,
+):
+    if api._cute_implementation is None:
+        pytest.skip(f"CuTe backend is unavailable: {api._cute_initialization_error}")
+
+    captured_graphs = []
+
+    def capture_backend(graph_module, _example_inputs):
+        captured_graphs.append(graph_module)
+        return lambda *args: (torch.empty_like(args[0]),)
+
+    def run(*args):
+        return api.heavily_compressed_attention(*args, backend="cute")
+
+    monkeypatch.setattr(api, "_load_cute_implementation", fail_loader)
+    monkeypatch.setattr(api, "_validate_cute_dependencies", fail_loader)
+    torch._dynamo.reset()
+    compiled = torch.compile(run, backend=capture_backend, fullgraph=True)
+    result = compiled(*make_arguments(share_kv=True))
+
+    assert result.shape == (2, 3, 5, 8)
+    assert result.dtype == torch.float32
+    assert len(captured_graphs) == 1
+    assert any(
+        node.target is torch.ops.attention_gym._cute_heavily_compressed_attention_forward.default
+        for node in captured_graphs[0].graph.nodes
+    )
+
+
+def test_cute_autograd_reaches_registered_backward_during_aot_trace(monkeypatch):
+    if api._cute_implementation is None:
+        pytest.skip(f"CuTe backend is unavailable: {api._cute_initialization_error}")
+
+    from functorch.compile import aot_function, make_boxed_func
+    from torch._subclasses.fake_tensor import FakeTensorMode
+
+    captured_backward_graphs = []
+
+    def forward_compiler(graph_module, _example_inputs):
+        return make_boxed_func(graph_module.forward)
+
+    def backward_compiler(graph_module, _example_inputs):
+        captured_backward_graphs.append(graph_module)
+        return make_boxed_func(graph_module.forward)
+
+    def run(*tensor_args):
+        return api.heavily_compressed_attention(
+            *tensor_args,
+            2,
+            5,
+            4,
+            True,
+            backend="cute",
+        )
+
+    monkeypatch.setattr(api, "_load_cute_implementation", fail_loader)
+    monkeypatch.setattr(api, "_validate_cute_dependencies", fail_loader)
+    compiled = aot_function(
+        run,
+        fw_compiler=forward_compiler,
+        bw_compiler=backward_compiler,
+    )
+    with FakeTensorMode():
+        tensor_args = tuple(
+            tensor.requires_grad_() for tensor in make_arguments(share_kv=True)[:8]
+        )
+        compiled(*tensor_args).sum().backward()
+
+    assert len(captured_backward_graphs) == 1
+    assert any(
+        node.target is torch.ops.attention_gym._cute_heavily_compressed_attention_backward.default
+        for node in captured_backward_graphs[0].graph.nodes
+    )
 
 
 def test_triton_spelling_preserves_eager_fallback(monkeypatch):
