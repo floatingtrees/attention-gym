@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 import importlib
+from collections.abc import Callable
 from importlib import metadata
 from typing import Literal
 
 import torch
-
 
 Backend = Literal["eager", "triton", "cute"]
 Mode = Literal["auto", "chunked", "recurrent"]
@@ -66,9 +65,7 @@ def _validate_inputs(
     if sliding_window_size < 0:
         raise ValueError("sliding_window_size must be non-negative.")
     if rope_dims <= 0 or rope_dims % 2 or rope_dims > dim:
-        raise ValueError(
-            "rope_dims must be positive, even, and no larger than head_dim."
-        )
+        raise ValueError("rope_dims must be positive, even, and no larger than head_dim.")
 
     for name, tensor in tensors:
         assert isinstance(tensor, torch.Tensor)
@@ -89,8 +86,7 @@ def _validate_inputs(
         ):
             expected_heads = "1 or heads" if share_kv else "heads"
             raise ValueError(
-                f"{name} must have shape "
-                f"[batch, {expected_heads}, sequence, head_dim]."
+                f"{name} must have shape [batch, {expected_heads}, sequence, head_dim]."
             )
 
     expected_shapes = {
@@ -172,7 +168,7 @@ def _initialize_cute_backend() -> None:
         return
     try:
         _cute_implementation = _load_cute_implementation()
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001
         # Optional kernels must not make the base package unimportable.
         _cute_initialization_error = error
 
@@ -208,8 +204,8 @@ def heavily_compressed_attention(
     - normalization weights: ``[D]``; learned sink: ``[H]``
 
     ``auto`` and ``chunked`` are prefill aliases. Recurrent decoding is not yet
-    implemented. The SM100 CuTe specialization accepts BF16 shared KV with
-    ``H=64`` and ``D=512``.
+    implemented. The SM100 CuTe specialization accepts contiguous BF16 shared
+    KV with ``D=512``.
     """
     if backend not in ("eager", "triton", "cute"):
         raise ValueError(

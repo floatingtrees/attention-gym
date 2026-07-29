@@ -8,8 +8,8 @@ or indexing work is launched here.
 
 from __future__ import annotations
 
-from collections import OrderedDict
 import math
+from collections import OrderedDict
 
 import torch
 from cutlass import BFloat16, Int32
@@ -28,7 +28,6 @@ from ...compressed_sparse_attention.cute.kernels import (
 )
 from .backward import compile_pack_dsa_local_indices
 from .local_attention import local_attention
-
 
 _HEAD_DIM = 512
 _TESTED_CUDA_VERSION = "13.3"
@@ -190,8 +189,8 @@ def _validate_configuration(
         raise ValueError("The CuTe backend requires S < 2**31.")
     if head_dim != _HEAD_DIM:
         raise ValueError("The SM100 CuTe specialization requires D=512.")
-    if heads % 64:
-        raise ValueError("The SM100 CuTe specialization requires H to be a multiple of 64.")
+    if heads <= 0:
+        raise ValueError("The SM100 CuTe specialization requires H to be positive.")
     if not share_kv:
         raise ValueError("The SM100 CuTe specialization requires share_kv=True.")
     if KV.shape[1] != 1:
@@ -255,6 +254,15 @@ def _sliding_window_attention_forward(
     )
 
     output = torch.empty_like(Q)
+    padded_sink = attention_sink
+    if heads % 64:
+        padded_heads = math.ceil(heads / 64) * 64
+        padded_sink = torch.zeros(
+            padded_heads,
+            device=attention_sink.device,
+            dtype=attention_sink.dtype,
+        )
+        padded_sink[:heads].copy_(attention_sink)
     combined_lse = (
         torch.empty(
             batch,
@@ -289,7 +297,12 @@ def _sliding_window_attention_forward(
             rope_dims,
         )(Q, cos, sin, query, query)
 
-        selected_output = output[:, head_offset : head_offset + active_heads].permute(0, 2, 1, 3)
+        direct_output = active_heads == tile_heads
+        selected_output = (
+            output[:, head_offset : head_offset + active_heads].permute(0, 2, 1, 3)
+            if direct_output
+            else torch.empty_like(query)
+        )
         selected_lse = (
             torch.empty(
                 batch,
@@ -304,7 +317,7 @@ def _sliding_window_attention_forward(
         local_attention(
             query,
             local_kv,
-            attention_sink,
+            padded_sink,
             cos,
             sin,
             window,
@@ -313,6 +326,10 @@ def _sliding_window_attention_forward(
             output=selected_output,
             lse=selected_lse,
         )
+        if not direct_output:
+            output[:, head_offset : head_offset + active_heads].copy_(
+                selected_output[:, :, :active_heads].permute(0, 2, 1, 3)
+            )
         if _return_state:
             assert combined_lse is not None and selected_lse is not None
             combined_lse[:, :, head_offset : head_offset + active_heads].copy_(

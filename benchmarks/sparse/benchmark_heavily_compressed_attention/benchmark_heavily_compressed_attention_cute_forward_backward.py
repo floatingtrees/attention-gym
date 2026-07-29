@@ -63,8 +63,10 @@ def main() -> None:
     torch.cuda.set_device(args.device)
     if torch.cuda.get_device_capability() != (10, 0):
         raise RuntimeError("This benchmark targets SM100 exclusively.")
-    if args.heads != 64 or args.head_dim != 512:
-        raise ValueError("The HCA CuTe specialization requires --heads=64 --head-dim=512.")
+    if args.heads <= 0 or args.head_dim != 512:
+        raise ValueError(
+            "The HCA CuTe specialization requires positive --heads and --head-dim=512."
+        )
 
     raw_inputs = make_inputs(args)
     inputs = tuple(

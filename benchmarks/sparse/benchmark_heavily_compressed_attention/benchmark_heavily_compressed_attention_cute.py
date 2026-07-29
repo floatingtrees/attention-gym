@@ -12,7 +12,6 @@ from attn_gym.sparse.heavily_compressed_attention.api import (
     heavily_compressed_attention,
 )
 
-
 MAX_ABS_ERROR = 3e-2
 
 
@@ -55,8 +54,7 @@ def make_inputs(args: argparse.Namespace, *, batch: int | None = None):
 def useful_pairs(args: argparse.Namespace) -> tuple[int, int]:
     """Count only reference-valid local and completed-compressed Q/KV pairs."""
     local = sum(
-        min(args.window, query_position + 1)
-        for query_position in range(args.sequence_length)
+        min(args.window, query_position + 1) for query_position in range(args.sequence_length)
     )
     compressed = sum(
         (query_position + 1) // args.compression_rate
@@ -67,13 +65,7 @@ def useful_pairs(args: argparse.Namespace) -> tuple[int, int]:
 
 def useful_flops(args: argparse.Namespace) -> int:
     local, compressed = useful_pairs(args)
-    return (
-        4
-        * args.batch
-        * args.heads
-        * args.head_dim
-        * (local + compressed)
-    )
+    return 4 * args.batch * args.heads * args.head_dim * (local + compressed)
 
 
 def parse_args() -> argparse.Namespace:
@@ -109,8 +101,10 @@ def main() -> None:
         raise RuntimeError("This benchmark requires CUDA.")
     if torch.cuda.get_device_capability() != (10, 0):
         raise RuntimeError("This benchmark targets SM100 exclusively.")
-    if args.heads != 64 or args.head_dim != 512:
-        raise ValueError("The HCA CuTe specialization requires --heads=64 --head-dim=512.")
+    if args.heads <= 0 or args.head_dim != 512:
+        raise ValueError(
+            "The HCA CuTe specialization requires positive --heads and --head-dim=512."
+        )
 
     if args.correctness_batch:
         correctness_inputs = make_inputs(args, batch=args.correctness_batch)
@@ -158,10 +152,7 @@ def main() -> None:
         f"shape: B={args.batch} H={args.heads} S={args.sequence_length} "
         f"D={args.head_dim} dtype=bfloat16"
     )
-    print(
-        f"sparsity: compression={args.compression_rate} window={args.window} "
-        "share_kv=True"
-    )
+    print(f"sparsity: compression={args.compression_rate} window={args.window} share_kv=True")
     print(
         f"useful pairs per batch: local={local_pairs:,} "
         f"completed-compressed={compressed_pairs:,} "

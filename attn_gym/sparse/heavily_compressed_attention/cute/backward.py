@@ -34,7 +34,8 @@ class PackDsaIndices:
         self.window = min(window, sequence)
         self.width = width
         self.token_capacity = token_capacity
-        self.kv_per_batch = blocks + sequence
+        self.local_length = sequence if self.window > 0 else 0
+        self.kv_per_batch = blocks + self.local_length
 
     @cute.jit
     def __call__(
