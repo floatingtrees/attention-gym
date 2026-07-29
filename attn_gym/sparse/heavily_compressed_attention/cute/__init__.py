@@ -140,11 +140,6 @@ def _require_sm100(device: torch.device) -> None:
             "The CuTe heavily compressed attention backend targets SM100 exclusively; "
             f"device {device} has compute capability {capability[0]}.{capability[1]}."
         )
-    if torch.version.cuda != _TESTED_CUDA_VERSION:
-        raise RuntimeError(
-            "The CuTe heavily compressed attention backend is validated with CUDA "
-            f"{_TESTED_CUDA_VERSION}; this PyTorch build uses CUDA {torch.version.cuda}."
-        )
 
 
 def _validate_configuration(
