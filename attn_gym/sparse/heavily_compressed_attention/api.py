@@ -116,49 +116,9 @@ def _load_triton_implementation() -> Callable[..., torch.Tensor]:
     return _load_eager_implementation()
 
 
-def _validate_cute_dependencies() -> None:
-    problems = []
-    for distribution, module, expected_version in _CUTE_RUNTIME_DEPENDENCIES:
-        try:
-            importlib.import_module(module.partition(".")[0])
-            importlib.import_module(module)
-        except (ImportError, RuntimeError) as error:
-            problems.append(f"{distribution}=={expected_version} is unavailable ({error})")
-            continue
-        try:
-            installed_version = metadata.version(distribution)
-        except metadata.PackageNotFoundError:
-            problems.append(f"{distribution}=={expected_version} is not installed")
-            continue
-        if installed_version != expected_version:
-            problems.append(
-                f"{distribution}=={expected_version} is required; found {installed_version}"
-            )
-    if problems:
-        raise RuntimeError(
-            "The CuTe DSL backend dependency set is incompatible. "
-            f"Install attn_gym[cute]. Details: {'; '.join(problems)}."
-        )
-
-
 def _load_cute_implementation() -> Callable[..., torch.Tensor]:
     module_name = f"{__package__}.cute"
-    _validate_cute_dependencies()
-    try:
-        module = importlib.import_module(module_name)
-    except ModuleNotFoundError as error:
-        missing_module = error.name or ""
-        if missing_module == module_name or missing_module.split(".")[0] in (
-            "flash_attn",
-            "cutlass",
-            "cuda",
-            "quack",
-        ):
-            raise RuntimeError(
-                "The CuTe backend for heavily compressed attention is not available; "
-                "install nvidia-cutlass-dsl, flash-attn-4, and quack-kernels."
-            ) from error
-        raise
+    module = importlib.import_module(module_name)
     return module.heavily_compressed_attention
 
 
