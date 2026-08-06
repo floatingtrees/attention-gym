@@ -25,7 +25,7 @@ def useful_flops(args: argparse.Namespace) -> int:
 
     Each query attends to num_topk sparse entries and up to sliding_window_size local entries.
     Two matmuls per query position (QK^T and PV), each is 2*N*D FLOPs.
-    Some assumptions: 
+    Some assumptions:
         No indices are -1 (standard for most implementations)
         Total number of documents << sequence length
         Dim >> 1, so softmax flops are negligible
@@ -106,12 +106,20 @@ def main() -> None:
 
         def fwd():
             return selected_attention(
-                query, local_kv, sparse_kv, kv_indices, attention_sink,
-                None, args.window, backend=backend,
+                query,
+                local_kv,
+                sparse_kv,
+                kv_indices,
+                attention_sink,
+                None,
+                args.window,
+                backend=backend,
             )
 
         out = fwd()
-        fwd_ms = triton.testing.do_bench(fwd, warmup=args.warmup, rep=args.rep, return_mode="median")
+        fwd_ms = triton.testing.do_bench(
+            fwd, warmup=args.warmup, rep=args.rep, return_mode="median"
+        )
         fwd_tflops = fwd_flops / (fwd_ms * 1e9)
 
         print(f"[{backend}] forward: {fwd_ms:.3f} ms  ({fwd_tflops:.2f} TFLOP/s)")
@@ -121,8 +129,10 @@ def main() -> None:
 
             def bwd():
                 return torch.autograd.grad(
-                    out, (query, local_kv, sparse_kv, attention_sink),
-                    grad_outputs=grad_output, retain_graph=True,
+                    out,
+                    (query, local_kv, sparse_kv, attention_sink),
+                    grad_outputs=grad_output,
+                    retain_graph=True,
                 )
 
             bwd()  # warmup autograd graph
@@ -144,8 +154,14 @@ def main() -> None:
 
             def fwd(b=backend):
                 return selected_attention(
-                    query, local_kv, sparse_kv, kv_indices, attention_sink,
-                    None, args.window, backend=b,
+                    query,
+                    local_kv,
+                    sparse_kv,
+                    kv_indices,
+                    attention_sink,
+                    None,
+                    args.window,
+                    backend=b,
                 )
 
             fwd()
