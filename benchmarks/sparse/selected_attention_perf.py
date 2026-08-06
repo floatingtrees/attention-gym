@@ -27,6 +27,9 @@ def useful_flops(args: argparse.Namespace) -> int:
 
     Each query attends to num_topk sparse entries and up to sliding_window_size local entries.
     Two matmuls per query position (QK^T and PV), each is 2*N*D FLOPs.
+    Some assumptions: 
+        No indices are -1 (standard for most implementations)
+        Total number of documents << sequence length
     """
     s = args.sequence_length
     d = args.head_dim
@@ -93,7 +96,6 @@ def main() -> None:
         f"sparsity: topk={args.topk} window={args.window} "
         f"share_kv={args.share_kv} dtype={args.dtype}"
     )
-    print()
 
     fwd_flops = useful_flops(args)
 
