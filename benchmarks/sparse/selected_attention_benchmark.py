@@ -6,8 +6,6 @@ Usage:
     python benchmarks/sparse/selected_attention_perf.py --batch 4 --sequence-length 4096
 """
 
-from __future__ import annotations
-
 import argparse
 
 import torch
@@ -30,6 +28,7 @@ def useful_flops(args: argparse.Namespace) -> int:
     Some assumptions: 
         No indices are -1 (standard for most implementations)
         Total number of documents << sequence length
+        Dim >> 1, so softmax flops are negligible
     """
     s = args.sequence_length
     d = args.head_dim
@@ -130,7 +129,11 @@ def main() -> None:
             bwd_ms = triton.testing.do_bench(
                 bwd, warmup=args.warmup, rep=args.rep, return_mode="median"
             )
-            bwd_tflops = fwd_flops * 2.5 / (bwd_ms * 1e9)
+            # We approximate backwards useful tflops as 2x forward
+            # We need dP/dO, dV/dO, dQ/dS, and dK/dS, which is 4 matmuls
+            # compared to the 2 in the forward pass
+
+            bwd_tflops = fwd_flops * 2 / (bwd_ms * 1e9)
             print(f"[{backend}] backward: {bwd_ms:.3f} ms  ({bwd_tflops:.2f} TFLOP/s)")
 
     if len(args.backend) == 2:
