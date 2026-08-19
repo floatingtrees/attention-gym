@@ -584,7 +584,8 @@ def _compressed_sparse_attention_forward(
             and Q.dtype == torch.bfloat16
             and _is_power_of_two(index_heads)
             and index_heads <= _TENSOR_INDEX_PACKED_HEADS
-            and index_dim == 64
+            and index_dim % 64 == 0
+            and index_dim <= 128
             and num_blocks % 64 == 0
             and sequence_length % compression_rate == 0
             and tensor_score_row_capacity >= sequence_length
